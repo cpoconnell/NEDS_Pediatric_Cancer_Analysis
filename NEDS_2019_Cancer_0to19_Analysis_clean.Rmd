@@ -1,0 +1,1184 @@
+---
+title: "NEDS 2019 Data"
+author: "Caitlin O'Connell"
+date: "03/03/2022"
+output: html_document
+---
+
+```{r load-packages, include=FALSE}
+# load packages
+pacman::p_load(tidyverse, haven, table1, sjmisc, gghalves, descr, survey, dplyr, openxlsx, odds.n.ends, lmtest, dplyr, mice, VIM, lattice, mitools, readxl, gtools, DiagrammeR)
+```
+
+# Figure 1
+```{r}
+#Figure 1
+grViz("digraph flowchart {
+
+      # node definitions with substituted label text
+      
+      node [fontname = Helvetica, shape = rectangle, fontsize=10] 
+      
+      # nodes indicate how many boxes you will have in your diagram.
+      
+      tab1 [label = '@@1'] # starting
+      tab2 [label = '@@2'] # exclusion 1
+      tab3 [label = '@@3'] # exclusion 2
+      tab4 [label = '@@4'] # exclusion 3
+      
+      # edge definitions with the node IDs are used to indicate how the rectangle boxes flow from each other.
+      
+      tab1 -> tab2 -> tab3 -> tab4
+}
+      #This set of code provides the text in each rectangle box.
+
+      [1]: 'Unweighted number of ED encounters in the NEDS 2019 core file n=33,147,251'
+      [2]: 'Excluding 26,345,540 encounters with age over 19 years old n=6,801,711'
+      [3]: 'Excluding 6,783,620 encounters with no cancer diagnosis n=18,091'
+      [4]: 'Excluding 7,298 encounters with benign neoplasms or neoplasms of unspecified nature n=10,793'
+      ")
+```
+
+
+
+# Data Import
+```{r data-import, include=FALSE}
+# File creation:
+# The NEDS 2019 Core data file was imported into SPSS and merged with the NEDS 2019 DX PR GRPS file by the encounter id number, KEY_ED. 
+# First exclusion: The file was filtered for encounters were the patient was aged 0 to 39. 
+# Second exclusion: The file was filtered for encounters that had a nonzero value in the DXCCSR_NEO variables.
+## Reference: https://hcup-us.ahrq.gov/db/vars/dxccsr_aaannn/nedsnote.jsp 
+
+# Import 2019 NEDS data from SPSS including only cancer cases and those aged 0 to 39
+NEDS_2019_Cancer_0to39 <- read_sav("/Users/caitlinoconnell/Library/CloudStorage/Box-Box/NEDS/SPSS data files/NEDS_2019_Merged_Cancer_0to39.sav")
+#removing labels from SPSS
+zap_labels(NEDS_2019_Cancer_0to39)
+```
+
+```{r}
+# In order to maintain the weights for the nationally represented, weighted survey analysis, one record from each hospital id (sampling frame) is needed in the analysis. We generated a list of all the unique hospital IDs from the Core file. Then we identified which IDs were not already in the NEDS_2019_Merged_Cancer_0to39 file. Lastly, we randomly selected a record from the CORE file for each missing hopsital ID that was not already represented in the main file for analysis. 
+
+# importing record with missing hospital records for weighted survey analysis
+Missing_Hops_ED_Records <- read_excel("/Users/caitlinoconnell/Library/CloudStorage/Box-Box/NEDS/Analysis/Missing Hops ED Records.xlsx")
+
+# combining data sets
+Fulldata <- rbind(NEDS_2019_Cancer_0to39, Missing_Hops_ED_Records) # merging two files together for analysis
+```
+
+## Importing Hospital Data 
+```{r}
+# Importing the NEDS 2019 hospital file
+Hosp_data <- read_dta(file = "/Users/caitlinoconnell/Library/CloudStorage/Box-Box/NEDS_data/2019/NEDS_2019_Hospital.dta")
+```
+
+## Adding Hopsital Data to full data
+```{r}
+Fulldata <- left_join(Fulldata, Hosp_data, by = "hosp_ed")
+```
+
+# Data Management
+```{r}
+# data management via NEDS variable descriptions: https://hcup-us.ahrq.gov/db/nation/neds/nedsdde.jsp 
+NEDS_2019_Cancer2 <- Fulldata %>%
+  mutate(sex = recode_factor(female,
+                                '0' = 'Male',
+                                '1' = 'Female')) %>%
+  mutate(died_visit = recode_factor(died_visit,
+                                    '0' = 'did not die',
+                                    '1' = 'died in the ED',
+                                    '2' = 'died in the hospital')) %>%
+  mutate(edevent = case_when(edevent == 1 ~ 0,
+                             edevent == 2 ~ 1,
+                             edevent == 3 ~ 2,
+                             edevent == 9 ~ 3,
+                             edevent == 98 ~ 4,
+                             edevent == 99 ~ 5)) %>%
+  mutate(edevent = factor(edevent, levels = c(0:5), 
+                          labels = c("ED visit in which the patient is treated and released",
+                                     "ED visit in which patient is admitted to same hospital",
+                                     "ED visit, patient transferred to different short-term hospital",
+                                     "ED visit, patient died in ED",
+                                     "ED visit, patient not admitted, destination unknown",
+                                     "ED visit, patient discharged, destination unknown (not admitted)"))) %>%
+  mutate(urban_rural.residence = case_when(pl_nchs %in% c(1:4) ~ 0,
+                                           pl_nchs == 5 ~ 1,
+                                           pl_nchs == 6 ~ 2)) %>%
+  mutate(urban_rural.residence = factor(urban_rural.residence, levels = c(0:2), 
+                                        labels = c("metro","micropolitan","rural"))) %>%
+  mutate(zipinc_qrtl = case_when(zipinc_qrtl == 4 ~ 0,
+                                 zipinc_qrtl == 3 ~ 1,
+                                 zipinc_qrtl == 2 ~ 2,
+                                 zipinc_qrtl == 1 ~ 3)) %>%
+  mutate(zipinc_qrtl = factor(zipinc_qrtl, levels = c(0:3), labels = c("$82,000 or more",
+                                                                       "$61,000 - $81,999",
+                                                                       "$48,000 - $60,999",
+                                                                       "$1 - $47,999"))) %>%
+  mutate(income_binary = case_when(zipinc_qrtl == "$1 - $47,999" ~ 1,
+                                   zipinc_qrtl %in% c("$82,000 or more","$61,000 - $81,999","$48,000 - $60,999") ~ 0)) %>%
+  mutate(income_binary = factor(income_binary, levels = c(0:1), labels = c("top three income quartiles","lowest"))) %>%
+  mutate(pay1_raw = case_when(pay1 == 3 ~ 0,
+                              pay1 == 2 ~ 1,
+                              pay1 == 1 ~ 2,
+                              pay1 == 4 ~ 3,
+                              pay1 == 5 ~ 4,
+                              pay1 == 6 ~ 5)) %>%
+  mutate(pay1_raw = factor(pay1_raw, levels = c(0:5), labels = c("Private","Medicaid","Medicare", "Self-pay","No charge","Other"))) %>%
+  mutate(pay1_grouped = case_when(pay1 == 3 ~ 0,
+                                  pay1 == 2 ~ 1,
+                                  pay1 == 1 ~ 3,
+                                  pay1 == 4 ~ 2,
+                                  pay1 == 5 ~ 2,
+                                  pay1 == 6 ~ 3)) %>%
+  mutate(pay1_grouped = factor(pay1_grouped, levels = c(0:3), 
+                               labels = c("Private","Medicaid","Self-pay/No charge","Other"))) %>%
+  mutate(pay2 = case_when(pay2 == 3 ~ 0,
+                          pay2 == 2 ~ 1,
+                          pay2 == 1 ~ 2,
+                          pay2 == 4 ~ 3,
+                          pay2 == 5 ~ 4,
+                          pay2 == 6 ~ 5)) %>%
+  mutate(pay2 = factor(pay2, levels = c(0:5), labels = c("Private","Medicaid","Medicare","Self-pay","No charge","Other"))) %>%
+  mutate(race = case_when(race == 1 ~ 0,
+                          race == 2 ~ 1,
+                          race == 3 ~ 2,
+                          race == 4 ~ 3,
+                          race == 5 ~ 4,
+                          race == 6 ~ 5)) %>%
+  mutate(race = factor(race, levels = c(0:5), labels = c("White","Black","Hispanic","Asian or Pacific Islander","Native American","Other"))) %>%
+  mutate(aweekend = recode_factor(aweekend,
+                                  '0' = 'Admitted Monday-Friday',
+                                  '1' = 'Admitted Saturday-Sunday')) %>%
+  mutate(agecat = cut(age, breaks = c(0,19,25,39,87), labels = c("0-19", "20-25","26-39","40 and above"), 
+                      include.lowest = TRUE)) %>%
+  mutate(cancerSub = if_else(is.na(Cancer_dx), 0,1)) %>%  # defining cancer patient subset variable
+  mutate(cancerSub = as.factor(cancerSub)) %>%
+  mutate(CCSR_group = substr(dxccsr_default_dx1,1,3)) %>%
+  mutate(hosp_urcat4 = case_when(hosp_urcat4 == 1 ~ 0,
+                                 hosp_urcat4 == 2 ~ 1,
+                                 hosp_urcat4 == 3 ~ 2,
+                                 hosp_urcat4 == 4 ~ 3,
+                                 hosp_urcat4 == 7 ~ 4,
+                                 hosp_urcat4 == 8 ~ 5,
+                                 hosp_urcat4 == 9 ~ 6)) %>%
+  mutate(hosp_urcat4 = factor(hosp_urcat4, levels = c(0:6), 
+                              labels = c("Large metropolitan (over 1 million residents)",
+                                         "Small metropolitan (less than 1 million residents)",
+                                         "Micropolitan",
+                                         "non-urban residual",
+                                         "Collapsed category of small metropolitan and micropolitan",
+                                         "Metropolitan",
+                                         "Non-metropolitan"))) %>%
+  mutate(hosp_control = recode_factor(hosp_control,
+                                      '0' = 'government or private',
+                                      '1' = 'government, nonfederal (public)',
+                                      '2' = 'private, not-for-profit',
+                                      '3' = 'private, investor owned',
+                                      '4' = 'private')) %>%
+  mutate(hosp_region = case_when(hosp_region == 1 ~ 0,
+                                 hosp_region == 2 ~ 1,
+                                 hosp_region == 3 ~ 2,
+                                 hosp_region == 4 ~ 3)) %>%
+  mutate(hosp_region = factor(hosp_region, levels = c(0:3), labels = c("Northeast","Midwest","South","West"))) %>%
+  mutate(hosp_trauma = recode_factor(hosp_trauma,
+                                     '0' = 'not trauma',
+                                     '1' = 'trauma center level I',
+                                     '2' = 'trauma center level II',
+                                     '3' = 'trauma center level III',
+                                     '7' = 'trauma center level II or III',
+                                     '8' = 'trauma center level I or II')) %>%
+  mutate(hosp_ur_teach = recode_factor(hosp_ur_teach,
+                                       '0' = 'Metropolitan non-teaching',
+                                       '1' = 'Metropolitan teaching',
+                                       '2' = 'Non-metropolitan hospital'))
+
+```
+
+#### Primary cancer diagnosis variable definition
+```{r}
+# Defining our first outcome variable: primary-cancer related encounter or non-primary cancer related encounter
+# First or Second listed diagnosis code contains "C" for cancer in the ICD10 diagnosis code
+# reference for this definition: https://www.cms.gov/files/document/fy-2022-icd-10-cm-coding-guidelines-updated-02012022.pdf 
+NEDS_2019_Cancer2 <- NEDS_2019_Cancer2 %>%
+  mutate(primary_cancer = if_else(grepl("C",i10_dx1),1,
+                                  if_else(grepl("C",i10_dx2),1,0))) %>%
+  mutate(primary_cancer = factor(primary_cancer, c(0:1), c("No","Yes")))
+```
+
+### Identifying cases with missing data
+```{r}
+# for outcome of primary cancer diagnosis
+NEDS_2019_Cancer_0to19 <- NEDS_2019_Cancer2 %>%
+  filter(age < 20) %>%
+  mutate(missing_data = if_else(is.na(sex) 
+                                | is.na(pay1_raw)
+                                | is.na(race)
+                                | is.na(urban_rural.residence)
+                                | is.na(zipinc_qrtl),
+                                "Yes", "No")) %>%
+  mutate(missing_data = as.factor(missing_data))
+
+summary(NEDS_2019_Cancer_0to19$missing_data)
+
+# Percentage of missing data for the subset of encounters with patients 0 to 19 years old was calculated from this missing data variable: Missing_data = Yes / Total number of records
+# (2173 / 18104)*100 = 12%
+# Used to determine how many imputations for the multiple imputation to impute the missing data
+```
+
+# Imputation plan
+Overall there is 12% missing data across all independent variables in the model. Specifically there 2 cases missing sex (<0.0%), 68 cases missing insurance (0.4%), 38 (0.2%) cases missing rural/urban residence, 141 (0.8%) missing zip code income quartile, and lastly, 1976 (10.9%) cases are missing race/ethnicity. 
+
+Variables to include in the imputation model:  age, discwt, edevent, sex, hosp_ed, key_ed, neds_stratum, pay1, pay2, urban_rural.residence, race, zipinc_qrtl, dsccsr_default_dx1, hosp_control, hosp_region, hosp_trauma, hosp_ur_teach, hosp_urcat4, hosp_ed, hospwt, primaryccsr, cancertype
+
+Link to helpful code for multiple imputation and complex survey design:
+https://gist.github.com/AaronGullickson/3ccb3fdd1778b32fc46df40d78faf5d3 
+
+Link for how to use an imputationList data set in survey design with survey package: 
+https://stackoverflow.com/questions/66713140/svydesign-in-r-survey-package-wont-accept-imputationlist 
+https://stackoverflow.com/questions/42502400/error-with-svydesign-using-imputed-data-sets 
+
+
+# Cancer type definition
+```{r}
+#Leading childhood cancer:  1. Leukemias 2. Brain and other nervous system 3. Non-hodgkin lymphoma
+#From CDC Wonder
+#Defining cancer type variable for leading cancers by dxccsr coding by HCUP
+#https://hcup-us.ahrq.gov/toolssoftware/ccsr/dxccsr.jsp  
+NEDS_2019_Cancer2 <- NEDS_2019_Cancer2 %>%
+  mutate(cancertype = if_else(dxccsr_neo059 !=0          # Leukemia - acute lymphoma leukemia (ALL)
+                              | dxccsr_neo060 !=0        # Leukemia - acute myeloid leukemia (AML)
+                              | dxccsr_neo061 !=0        # Leukemia - chronic lymphocytic leukemia (CLL)
+                              | dxccsr_neo062 !=0        # Leukemia - chronic myeloid leukemia (CML)
+                              | dxccsr_neo063 !=0        # Leukemia - hairy cell
+                              | dxccsr_neo064 !=0, "Leukemia",    # Leukemia - all other types
+                      if_else(dxccsr_neo048 !=0 | dxccsr_neo049 !=0, "brain or nervous system",
+                      if_else(dxccsr_neo058 !=0, "Non-hodgkin lymphoma",
+                      if_else(dxccsr_neo057 !=0, "Hodgkin lymphoma",
+                      if_else(dxccsr_neo029 !=0 | dxccsr_neo030 !=0, "Breast",
+                      if_else(dxccsr_neo001 != 0         # Head and neck cancers - eye
+                              | dxccsr_neo002 != 0       # Head and neck cancers - lip and oral cavity
+                              | dxccsr_neo003 != 0       # Head and neck cancers - throat
+                              | dxccsr_neo004 != 0       # Head and neck cancers - salivary gland
+                              | dxccsr_neo005 != 0       # Head and neck cancers - nasopharyngeal
+                              | dxccsr_neo006 != 0       # Head and neck cancers - hypopharyngeal
+                              | dxccsr_neo007 != 0       # Head and neck cancers - pharyngeal
+                              | dxccsr_neo008 != 0       # Head and neck cancers - laryngeal
+                              | dxccsr_neo009 != 0       # Head and neck cancers - tonsils
+                              | dxccsr_neo010 != 0 , "Head and neck",  # Head and neck cancers - all other types
+                      if_else(dxccsr_neo011 != 0, "Cardiac cancers",
+                      if_else(dxccsr_neo012 != 0         # Gastrointestinal cancers - esophagus
+                              | dxccsr_neo013 != 0       # Gastrointestinal cancers - stomach
+                              | dxccsr_neo014 != 0       # Gastrointestinal cancers - small intestine
+                              | dxccsr_neo015 != 0       # Gastrointestinal cancers - colorectal
+                              | dxccsr_neo016 != 0       # Gastrointestinal cancers - anus
+                              | dxccsr_neo017 != 0       # Gastrointestinal cancers - liver
+                              | dxccsr_neo018 != 0       # Gastrointestinal cancers - bile duct
+                              | dxccsr_neo019 != 0       # Gastrointestinal cancers - gallbladder
+                              | dxccsr_neo020 != 0       # Gastrointestinal cancers - peritoneum
+                              | dxccsr_neo021 != 0, "GI",  # Gastrointestinal cancers - all other types
+                      if_else(dxccsr_neo022 != 0, "Respiratory", 
+                      if_else(dxccsr_neo023 != 0, "Bone",
+                      if_else(dxccsr_neo024 != 0, "Sarcoma",
+                      if_else(dxccsr_neo025 != 0         # Skin cancers - melanoma
+                              | dxccsr_neo026 != 0       # Skin cancers - basal cell carcinoma
+                              | dxccsr_neo027 != 0       # Skin cancers - squamous cell carcinoma
+                              | dxccsr_neo028 != 0, "Skin cancer",  # Skin cancers - all other types
+                      if_else(dxccsr_neo031 != 0         # Female reproductive system cancers - uterus
+                              | dxccsr_neo032 != 0       # Female reproductive system cancers - cervix
+                              | dxccsr_neo033 != 0       # Female reproductive system cancers - ovary
+                              | dxccsr_neo034 != 0       # Female reproductive system cancers - fallopian tube
+                              | dxccsr_neo035 != 0       # Female reproductive system cancers - endometrium 
+                              | dxccsr_neo036 != 0       # Female reproductive system cancers - vulva 
+                              | dxccsr_neo037 != 0       # Female reproductive system cancers - vagina
+                              | dxccsr_neo038 != 0, "Female reproductive",  # Female reproductive system cancers - all other types
+                      if_else(dxccsr_neo039 != 0         # Male reproductive system cancers - prostate
+                              | dxccsr_neo040 != 0       # Male reproductive system cancers - testis
+                              | dxccsr_neo041 != 0       # Male reproductive system cancers - penis
+                              | dxccsr_neo042 != 0, "Male reproductive",  # Male reproductive system cancers - all other types
+                      if_else(dxccsr_neo043 != 0         # Urinary system cancers - bladder
+                              | dxccsr_neo044 != 0       # Urinary system cancers - ureter and renal pelvis
+                              | dxccsr_neo045 != 0       # Urinary system cancers - kidney 
+                              | dxccsr_neo046 != 0       # Urinary system cancers - urethra
+                              | dxccsr_neo047 != 0 , "Urinary systems",  # Urinary system cancers - all other types
+                      if_else(dxccsr_neo050 != 0         # Endocrine system cancers - thyroid
+                              | dxccsr_neo051 != 0       # Endocrine system cancers - pancreas
+                              | dxccsr_neo052 != 0       # Endocrine system cancers - thymus
+                              | dxccsr_neo053 != 0       # Endocrine system cancers - adrenocortical
+                              | dxccsr_neo054 != 0       # Endocrine system cancers - parathyroid
+                              | dxccsr_neo055 != 0       # Endocrine system cancers - pituitary gland
+                              | dxccsr_neo056 != 0, "Endocrine systems",  # Endocrine system cancers - all other types
+                      if_else(dxccsr_neo065 != 0, "Multiple Myeloma",
+                      if_else(dxccsr_neo066 != 0, "Malignant neuroendocrine tumors",
+                      if_else(dxccsr_neo067 != 0, "Mesothelioma",
+                      if_else(dxccsr_neo068 != 0, "Myelodysplastic syndrome (MDS)",
+                      if_else(dxccsr_neo069 != 0, "Cancer of other sites",
+                      if_else(dxccsr_neo070 != 0, "Secondary malignancies",
+                      if_else(dxccsr_neo071 != 0, "Malignant neoplasm, unspecified",
+                      if_else(dxccsr_neo072 != 0, "Neoplasms of unspecified nature",
+                      if_else(dxccsr_neo073 != 0, "Benign Neoplasms",
+                      if_else(dxccsr_neo074 != 0, "Conditions due to cancer/treatment",
+                      NULL))))))))))))))))))))))))))) %>% 
+  mutate(cancertype = as.factor(cancertype)) %>%
+  mutate(cancertype = expss::if_na(cancertype, "No cancer", label = NULL)) %>%
+  mutate(cancer_exclude = if_else(cancertype %in% c("Benign Neoplasms","No cancer","Neoplasms of unspecified nature"), 1, 0))
+
+summary(NEDS_2019_Cancer2$cancertype)
+
+table(NEDS_2019_Cancer2$cancertype, NEDS_2019_Cancer2$cancer_exclude, useNA = "always")
+
+table(NEDS_2019_Cancer2$cancertype, NEDS_2019_Cancer2$agecat, useNA = "always")
+
+table(NEDS_2019_Cancer2$cancertype, NEDS_2019_Cancer2$zipinc_qrtl, useNA = "always")
+
+# Exploration of benign neoplasms
+benign <- NEDS_2019_Cancer2 %>% 
+  filter(age < 20) %>% 
+  filter(cancertype == "Benign Neoplasms")
+
+write.xlsx(benign,"benign_cancertype.xlsx", overwrite = TRUE)
+```
+
+#### Table 1. Descriptive Statistics for Pediatric Cancer patients (ages 0-19) with cancer type
+```{r descriptive statistics, message=FALSE, echo=FALSE}
+label(NEDS_2019_Cancer2$pay1_grouped) <- "Insurance"
+label(NEDS_2019_Cancer2$urban_rural.residence) <- "Urban/Rural Residence"
+label(NEDS_2019_Cancer2$zipinc_qrtl) <- "Zipcode Income Quartile"
+label(NEDS_2019_Cancer2$sex) <- "Sex"
+label(NEDS_2019_Cancer2$agecat) <- "Age in years"
+label(NEDS_2019_Cancer2$race) <- "Race/Ethnicity"
+label(NEDS_2019_Cancer2$cancertype) <- "Cancer Type"
+
+NEDS_2019_Cancer_0to19 <- NEDS_2019_Cancer2 %>%
+  filter(agecat == "0-19") %>%
+  filter(cancerSub == 1) %>%
+  filter(cancer_exclude == 0)
+
+table1(~ sex + age + race + pay1_grouped + urban_rural.residence + zipinc_qrtl + cancertype | primary_cancer,
+       data = NEDS_2019_Cancer_0to19)
+
+table1( ~ sex + age + race + pay1_grouped + urban_rural.residence + zipinc_qrtl + cancertype | edevent,
+        data = NEDS_2019_Cancer_0to19)
+
+```
+
+#### Table of Primary Diagnosis Code and Primary Cancer vs. Not Primary Cancer (Supplementary Table 1)
+```{r}
+dx_primary <- NEDS_2019_Cancer2 %>%
+  filter(agecat == "0-19") %>%
+  filter(cancerSub == 1) %>%
+  filter(cancer_exclude == 0) %>%
+  filter(primary_cancer == "Yes") %>%
+  group_by(i10_dx1) %>%
+  count(primary_cancer)
+
+dx_nonprimary <- NEDS_2019_Cancer2 %>%
+  filter(agecat == "0-19") %>%
+  filter(cancerSub == 1) %>%
+  filter(cancer_exclude == 0) %>%
+  filter(primary_cancer == "No") %>%
+  group_by(i10_dx1) %>%
+  count(primary_cancer)
+
+sheets <- list("primary" = dx_primary,
+               "non-primary" = dx_nonprimary)
+write.xlsx(sheets, file="first diagnosis code_by primary.xlsx", rowNames = TRUE, keepNA=TRUE, overwrite=TRUE)
+```
+
+
+# Distribution of cancer diagnosis position
+```{r}
+NEDS_2019_Cancer_0to19 <- NEDS_2019_Cancer_0to19 %>%
+  mutate(cancerposition = if_else(grepl("C",i10_dx1),1, if_else(grepl("C",i10_dx2),2,
+                          if_else(grepl("C",i10_dx3),3, if_else(grepl("C",i10_dx4),4,
+                          if_else(grepl("C",i10_dx5),5, if_else(grepl("C",i10_dx6),6,
+                          if_else(grepl("C",i10_dx7),7, if_else(grepl("C",i10_dx8),8,
+                          if_else(grepl("C",i10_dx9),9, if_else(grepl("C",i10_dx10),10,
+                          if_else(grepl("C",i10_dx11),11, if_else(grepl("C",i10_dx12),12,
+                          if_else(grepl("C",i10_dx13),13, if_else(grepl("C",i10_dx14),14,
+                          if_else(grepl("C",i10_dx15),15, if_else(grepl("C",i10_dx16),16,
+                          if_else(grepl("C",i10_dx17),17, if_else(grepl("C",i10_dx18),18,
+                          if_else(grepl("C",i10_dx19),19, if_else(grepl("C",i10_dx20),20,
+                          if_else(grepl("C",i10_dx21),21, if_else(grepl("C",i10_dx22),22,
+                          if_else(grepl("C",i10_dx23),23, if_else(grepl("C",i10_dx24),24,
+                          if_else(grepl("C",i10_dx25),25, if_else(grepl("C",i10_dx26),26,
+                          if_else(grepl("C",i10_dx27),27, if_else(grepl("C",i10_dx28),28,
+                          if_else(grepl("C",i10_dx29),29, if_else(grepl("C",i10_dx30),30,
+                          if_else(grepl("C",i10_dx31),31, if_else(grepl("C",i10_dx32),32,
+                          if_else(grepl("C",i10_dx33),33, if_else(grepl("C",i10_dx34),34,
+                          if_else(grepl("C",i10_dx35),35, 0 )))))))))))))))))))))))))))))))))))) %>%
+  mutate(cancerposition = as.factor(cancerposition))
+NEDS_2019_Cancer_0to19 %>%
+  ggplot(x=cancerposition) +
+  geom_bar(aes(x=cancerposition))
+
+```
+
+
+# Non-weighted, complete case Analysis
+#### Non-weighted analysis data set
+```{r}
+# filtering dataset for those under 20 and those with cancer diagnosis
+NEDS_cancer_0to19_exclude <- NEDS_2019_Cancer2 %>%
+  filter(age < 20) %>%
+  filter(cancer_exclude == 0)
+
+# cancer-related cases and numbers by predictors (used in results table 2)
+table(NEDS_cancer_0to19_exclude$race, NEDS_cancer_0to19_exclude$primary_cancer, useNA = "always")
+table(NEDS_cancer_0to19_exclude$race, useNA = "always")
+
+table(NEDS_cancer_0to19_exclude$urban_rural.residence, NEDS_cancer_0to19_exclude$primary_cancer, useNA = "always")
+table(NEDS_cancer_0to19_exclude$urban_rural.residence, useNA = "always")
+
+table(NEDS_cancer_0to19_exclude$zipinc_qrtl, NEDS_cancer_0to19_exclude$primary_cancer, useNA = "always")
+table(NEDS_cancer_0to19_exclude$zipinc_qrtl, useNA = "always")
+
+table(NEDS_cancer_0to19_exclude$pay1_grouped, NEDS_cancer_0to19_exclude$primary_cancer, useNA = "always")
+table(NEDS_cancer_0to19_exclude$pay1_grouped, useNA = "always")
+
+
+```
+
+#### Race Analysis for primary cancer diagnosis - unweighted and complete case
+```{r}
+# regression model for sex and race as predictors of having a cancer diagnosis as the primary ED diagnosis
+RaceChild <- summary(glm(primary_cancer ~ race, family = quasibinomial(), data = NEDS_cancer_0to19_exclude))
+
+Race_coefficients <- data.frame(RaceChild$coefficients)
+
+# calculating odds ratio
+Race_coefficients$OR <- round(exp(Race_coefficients$Estimate),2)
+# calculating confidence intervals
+Race_coefficients$lower95 <- round(exp(Race_coefficients$Estimate - 1.96*Race_coefficients$Std..Error),2)
+Race_coefficients$upper95 <- round(exp(Race_coefficients$Estimate + 1.96*Race_coefficients$Std..Error),2)
+
+```
+
+#### Income Analysis for primary cancer diagnosis - unweighted and complete case
+```{r}
+IncomeChildren <- summary(glm(primary_cancer ~ age + race + urban_rural.residence + zipinc_qrtl, family = quasibinomial(), 
+                              data = NEDS_cancer_0to19_exclude))
+
+Income_coefficients <- data.frame(IncomeChildren$coefficients)
+# calculating odds ratio to two decimal places
+Income_coefficients$OR <- round(exp(Income_coefficients$Estimate),2)
+# calculating confidence intervals
+Income_coefficients$lower95 <- round((exp(Income_coefficients$Estimate - 1.96*Income_coefficients$Std..Error)),2)
+Income_coefficients$upper95 <- round((exp(Income_coefficients$Estimate + 1.96*Income_coefficients$Std..Error)),2)
+```
+
+#### Urban_Rural Analysis for primary cancer diagnosis - unweighted and complete case
+```{r}
+UrRlChildren <- summary(glm(primary_cancer ~ race + urban_rural.residence, family = quasibinomial(), data = NEDS_cancer_0to19_exclude))
+
+UrRl_coefficients <- data.frame(UrRlChildren$coefficients)
+UrRl_coefficients$OR <- round(exp(UrRl_coefficients$Estimate),2)
+UrRl_coefficients$lower95 <- round((exp(UrRl_coefficients$Estimate - 1.96*UrRl_coefficients$Std..Error)),2)
+UrRl_coefficients$upper95 <- round((exp(UrRl_coefficients$Estimate + 1.96*UrRl_coefficients$Std..Error)),2)
+```
+
+#### Insurance Analysis for primary cancer diagnosis - unweighted and complete case
+```{r}
+Insurance_Children <- summary(glm(primary_cancer ~ age + race + zipinc_qrtl + urban_rural.residence + pay1_grouped, 
+                                  family = quasibinomial(),
+                                  data = NEDS_cancer_0to19_exclude))
+
+Insurance_coefficients <- data.frame(Insurance_Children$coefficients)
+Insurance_coefficients$OR <- round(exp(Insurance_coefficients$Estimate),2)
+Insurance_coefficients$lower95 <- round((exp(Insurance_coefficients$Estimate - 1.96*Insurance_coefficients$Std..Error)),2)
+Insurance_coefficients$upper95 <- round((exp(Insurance_coefficients$Estimate + 1.96*Insurance_coefficients$Std..Error)),2)
+```
+
+## ED Disposition Status - Released or Admitted - Survey Analysis 
+```{r}
+# Dropping those participants with ED visit that died, were transferred or their status is unknown
+# filtering data set to those treated and released versus admitted
+NEDS_cancer_0to19_exclude <- NEDS_cancer_0to19_exclude %>%
+  filter(edevent %in% c("ED visit in which the patient is treated and released", 
+                        "ED visit in which patient is admitted to same hospital"))
+
+# ED admission and numbers by predictors
+table(NEDS_cancer_0to19_exclude$race, NEDS_cancer_0to19_exclude$edevent, useNA = "always")
+table(NEDS_cancer_0to19_exclude$race, useNA = "always")
+
+table(NEDS_cancer_0to19_exclude$urban_rural.residence, NEDS_cancer_0to19_exclude$edevent, useNA = "always")
+table(NEDS_cancer_0to19_exclude$urban_rural.residence, useNA = "always")
+
+table(NEDS_cancer_0to19_exclude$zipinc_qrtl, NEDS_cancer_0to19_exclude$edevent, useNA = "always")
+table(NEDS_cancer_0to19_exclude$zipinc_qrtl, useNA = "always")
+
+table(NEDS_cancer_0to19_exclude$pay1_grouped, NEDS_cancer_0to19_exclude$edevent, useNA = "always")
+table(NEDS_cancer_0to19_exclude$pay1_grouped, useNA = "always")
+
+table1( ~ sex + age + race + pay1_grouped + urban_rural.residence + zipinc_qrtl + cancertype + i10_dx1 | edevent,
+        data = NEDS_cancer_0to19_exclude)
+
+```
+
+```{r}
+# Dropping those participants with ED visit that died, were transferred or their status is unknown
+# filtering data set to those treated and released versus admitted
+# filtering for only primary-cancer related encounters
+# used for Table 3 
+NEDS_cancer_0to19_exclude_p <- NEDS_cancer_0to19_exclude %>%
+  filter(edevent %in% c("ED visit in which the patient is treated and released", 
+                        "ED visit in which patient is admitted to same hospital")) %>%
+  filter(primary_cancer == "Yes")
+
+# ED admission and numbers by predictors
+table(NEDS_cancer_0to19_exclude_p$race, NEDS_cancer_0to19_exclude_p$edevent, useNA = "always")
+table(NEDS_cancer_0to19_exclude_p$race, useNA = "always")
+
+table(NEDS_cancer_0to19_exclude_p$urban_rural.residence, NEDS_cancer_0to19_exclude_p$edevent, useNA = "always")
+table(NEDS_cancer_0to19_exclude_p$urban_rural.residence, useNA = "always")
+
+table(NEDS_cancer_0to19_exclude_p$zipinc_qrtl, NEDS_cancer_0to19_exclude_p$edevent, useNA = "always")
+table(NEDS_cancer_0to19_exclude_p$zipinc_qrtl, useNA = "always")
+
+table(NEDS_cancer_0to19_exclude_p$pay1_grouped, NEDS_cancer_0to19_exclude_p$edevent, useNA = "always")
+table(NEDS_cancer_0to19_exclude_p$pay1_grouped, useNA = "always")
+
+```
+
+
+#### Race Analysis for ED Disposition - unweighted and complete case
+```{r}
+RaceChildrenED <- summary(glm(edevent ~ race, family = quasibinomial(), data = NEDS_cancer_0to19_exclude)) 
+
+Race_coefficients_ED <- data.frame(RaceChildrenED$coefficients)
+
+# calculating odds ratio
+Race_coefficients_ED$OR <- round(exp(Race_coefficients_ED$Estimate),2)
+# calculating confidence intervals
+Race_coefficients_ED$lower95 <- round(exp(Race_coefficients_ED$Estimate - 1.96*Race_coefficients_ED$Std..Error),2)
+Race_coefficients_ED$upper95 <- round(exp(Race_coefficients_ED$Estimate + 1.96*Race_coefficients_ED$Std..Error),2)
+
+```
+
+#### Income Analysis for ED Disposition - unweighted and complete case
+```{r}
+IncomeChildrenED <- summary(glm(edevent ~ age + race + urban_rural.residence + zipinc_qrtl, family = quasibinomial(), data = NEDS_cancer_0to19_exclude))
+
+Income_coefficients_ED <- data.frame(IncomeChildrenED$coefficients)
+# calculating odds ratio to two decimal places
+Income_coefficients_ED$OR <- round(exp(Income_coefficients_ED$Estimate),2)
+# calculating confidence intervals
+Income_coefficients_ED$lower95 <- round((exp(Income_coefficients_ED$Estimate - 1.96*Income_coefficients_ED$Std..Error)),2)
+Income_coefficients_ED$upper95 <- round((exp(Income_coefficients_ED$Estimate + 1.96*Income_coefficients_ED$Std..Error)),2)
+```
+
+#### Urban_Rural Analysis for ED Disposition - unweighted and complete case
+```{r}
+UrRlChildrenED <- summary(glm(edevent ~ race + urban_rural.residence, family = quasibinomial(), data = NEDS_cancer_0to19_exclude))
+
+UrRl_coefficients_ED <- data.frame(UrRlChildrenED$coefficients)
+UrRl_coefficients_ED$OR <- round(exp(UrRl_coefficients_ED$Estimate),2)
+UrRl_coefficients_ED$lower95 <- round((exp(UrRl_coefficients_ED$Estimate - 1.96*UrRl_coefficients_ED$Std..Error)),2)
+UrRl_coefficients_ED$upper95 <- round((exp(UrRl_coefficients_ED$Estimate + 1.96*UrRl_coefficients_ED$Std..Error)),2)
+```
+
+#### Insurance Analysis for ED Disposition
+```{r}
+Insurance_ChildrenED <- summary(glm(edevent ~ age + race + zipinc_qrtl + urban_rural.residence + pay1_grouped, 
+                                    family = quasibinomial(), data = NEDS_cancer_0to19_exclude))
+
+Insurance_coefficients_ED <- data.frame(Insurance_ChildrenED$coefficients)
+Insurance_coefficients_ED$OR <- round(exp(Insurance_coefficients_ED$Estimate),2)
+Insurance_coefficients_ED$lower95 <- round((exp(Insurance_coefficients_ED$Estimate - 1.96*Insurance_coefficients_ED$Std..Error)),2)
+Insurance_coefficients_ED$upper95 <- round((exp(Insurance_coefficients_ED$Estimate + 1.96*Insurance_coefficients_ED$Std..Error)),2)
+```
+
+#### Exporting results to Excel
+```{r exporting to excel}
+sheets<-list("Table1 (PrimaryDX_Race)" = Race_coefficients, 
+             "Table2 (PrimaryDX_Income)" = Income_coefficients, 
+             "Table3 (PrimaryDX_Residence)" = UrRl_coefficients, 
+             "Table4 (PrimaryDX_Insurance)" = Insurance_coefficients,
+             "Table5 (Disp by Race)" = Race_coefficients_ED, 
+             "Table6 (Disp by Income)" = Income_coefficients_ED, 
+             "Table7 (Disp by Residence)" = UrRl_coefficients_ED, 
+             "Table8 (Disp by Insurance)" = Insurance_coefficients_ED)
+write.xlsx(sheets, file="non_weighted_children_analysis.xlsx", rowNames = TRUE, keepNA=TRUE, overwrite=TRUE)
+```
+
+# Survey Analysis - Weighted Analysis
+## Survey Design
+```{r}
+svydes <- svydesign(
+  id = ~key_ed, # ID of the emergency encounter
+  strata = ~neds_stratum.x, 
+  weights = ~discwt.x, 
+  nest = TRUE,
+  data = NEDS_2019_Cancer2,
+  multicore = T)
+# survey subset for cancer patients
+cancersub <- subset(svydes, cancerSub == 1 & cancer_exclude == 0)
+# survey subset for limiting ED event to treated and released versus admitted
+edeventsub <- subset(svydes, edevent %in% c("ED visit in which the patient is treated and released",
+                                            "ED visit in which patient is admitted to same hospital")
+                     & cancerSub == 1 & cancer_exclude == 0)
+```
+
+#### Survey totals - used for Table 1 weighted descriptive statistics
+```{r}
+childrensub <- subset(svydes, cancerSub == 1 & agecat == "0-19" & cancer_exclude == 0)
+
+  gtsummary::tbl_svysummary(
+    data = childrensub,
+      by = primary_cancer,
+      include = c(sex, age, race, urban_rural.residence, zipinc_qrtl, pay1_grouped, primary_cancer, cancertype),
+      label = list(sex ~ "Sex",
+                   age ~ "Age (years)",
+                   race ~ "Race/Ethnicity",
+                   urban_rural.residence ~ "Urban/Rural Residence",
+                   zipinc_qrtl ~ "Zip Code Income Quartile",
+                   pay1_grouped ~ "Insurance",
+                   cancertype ~ "Cancer Type"),
+      statistic=list(sex ~ "{n} ({p}%)",
+                     age ~ "{mean} ({sd})",
+                     race ~ "{n} ({p}%)",
+                     urban_rural.residence ~ "{n} ({p}%)",
+                     zipinc_qrtl ~ "{n} ({p}%)",
+                     pay1_grouped ~ "{n} ({p}%)",
+                     cancertype ~ "{n} ({p})")
+   )%>% gtsummary::add_overall(last=TRUE)
+```
+
+
+#### Race Analysis for primary cancer diagnosis - weighted and complete case
+```{r}
+# regression model for sex and race as predictors of having a cancer diagnosis as the primary ED diagnosis
+RaceChildren <- summary(svyglm(primary_cancer ~ race, design = cancersub, agecat == "0-19", family = quasibinomial())) 
+
+Race_coefficients <- data.frame(RaceChildren$coefficients)
+
+# calculating odds ratio
+Race_coefficients$OR <- round(exp(Race_coefficients$Estimate),2)
+# calculating confidence intervals
+Race_coefficients$lower95 <- round(exp(Race_coefficients$Estimate - 1.96*Race_coefficients$Std..Error),2)
+Race_coefficients$upper95 <- round(exp(Race_coefficients$Estimate + 1.96*Race_coefficients$Std..Error),2)
+
+```
+
+#### Income Analysis for primary cancer diagnosis - weighted and complete case
+```{r}
+IncomeChildren <- summary(svyglm(primary_cancer ~ age + race + urban_rural.residence + zipinc_qrtl, design = cancersub, agecat == "0-19", family = quasibinomial()))
+
+Income_coefficients <- data.frame(IncomeChildren$coefficients)
+# calculating odds ratio to two decimal places
+Income_coefficients$OR <- round(exp(Income_coefficients$Estimate),2)
+# calculating confidence intervals
+Income_coefficients$lower95 <- round((exp(Income_coefficients$Estimate - 1.96*Income_coefficients$Std..Error)),2)
+Income_coefficients$upper95 <- round((exp(Income_coefficients$Estimate + 1.96*Income_coefficients$Std..Error)),2)
+```
+
+#### Urban_Rural Analysis for primary cancer diagnosis - weighted and complete case
+```{r}
+UrRlChildren <- summary(svyglm(primary_cancer ~ race + urban_rural.residence, design = cancersub, agecat == "0-19", family = quasibinomial()))
+
+UrRl_coefficients <- data.frame(UrRlChildren$coefficients)
+UrRl_coefficients$OR <- round(exp(UrRl_coefficients$Estimate),2)
+UrRl_coefficients$lower95 <- round((exp(UrRl_coefficients$Estimate - 1.96*UrRl_coefficients$Std..Error)),2)
+UrRl_coefficients$upper95 <- round((exp(UrRl_coefficients$Estimate + 1.96*UrRl_coefficients$Std..Error)),2)
+```
+
+#### Insurance Analysis for primary cancer diagnosis - weighted and complete case
+```{r}
+Insurance_Children <- summary(svyglm(primary_cancer ~ age + race + zipinc_qrtl + urban_rural.residence + pay1_grouped, design = cancersub, agecat == "0-19", family = quasibinomial()))
+
+Insurance_coefficients <- data.frame(Insurance_Children$coefficients)
+Insurance_coefficients$OR <- round(exp(Insurance_coefficients$Estimate),2)
+Insurance_coefficients$lower95 <- round((exp(Insurance_coefficients$Estimate - 1.96*Insurance_coefficients$Std..Error)),2)
+Insurance_coefficients$upper95 <- round((exp(Insurance_coefficients$Estimate + 1.96*Insurance_coefficients$Std..Error)),2)
+```
+
+## ED Disposition Status - Released or Admitted - Survey Analysis 
+#### Race Analysis for ED Disposition - weighted and complete case
+```{r}
+RaceChildrenED <- summary(svyglm(edevent ~ race, design = edeventsub, agecat == "0-19", family = quasibinomial())) 
+
+Race_coefficients_ED <- data.frame(RaceChildrenED$coefficients)
+
+# calculating odds ratio
+Race_coefficients_ED$OR <- round(exp(Race_coefficients_ED$Estimate),2)
+# calculating confidence intervals
+Race_coefficients_ED$lower95 <- round(exp(Race_coefficients_ED$Estimate - 1.96*Race_coefficients_ED$Std..Error),2)
+Race_coefficients_ED$upper95 <- round(exp(Race_coefficients_ED$Estimate + 1.96*Race_coefficients_ED$Std..Error),2)
+
+```
+
+#### Income Analysis for ED Disposition - weighted and complete case
+```{r}
+IncomeChildrenED <- summary(svyglm(edevent ~ age + race + urban_rural.residence + zipinc_qrtl, design = edeventsub, agecat == "0-19", family = quasibinomial()))
+
+Income_coefficients_ED <- data.frame(IncomeChildrenED$coefficients)
+# calculating odds ratio to two decimal places
+Income_coefficients_ED$OR <- round(exp(Income_coefficients_ED$Estimate),2)
+# calculating confidence intervals
+Income_coefficients_ED$lower95 <- round((exp(Income_coefficients_ED$Estimate - 1.96*Income_coefficients_ED$Std..Error)),2)
+Income_coefficients_ED$upper95 <- round((exp(Income_coefficients_ED$Estimate + 1.96*Income_coefficients_ED$Std..Error)),2)
+```
+
+#### Urban_Rural Analysis for ED Disposition - weighted and complete case
+```{r}
+UrRlChildrenED <- summary(svyglm(edevent ~ race + urban_rural.residence, design = edeventsub, agecat == "0-19", family = quasibinomial()))
+
+UrRl_coefficients_ED <- data.frame(UrRlChildrenED$coefficients)
+UrRl_coefficients_ED$OR <- round(exp(UrRl_coefficients_ED$Estimate),2)
+UrRl_coefficients_ED$lower95 <- round((exp(UrRl_coefficients_ED$Estimate - 1.96*UrRl_coefficients_ED$Std..Error)),2)
+UrRl_coefficients_ED$upper95 <- round((exp(UrRl_coefficients_ED$Estimate + 1.96*UrRl_coefficients_ED$Std..Error)),2)
+```
+
+#### Insurance Analysis for ED Disposition - weighted and complete case
+```{r}
+Insurance_ChildrenED <- summary(svyglm(edevent ~ age + race + zipinc_qrtl + urban_rural.residence + pay1_grouped, design = edeventsub, agecat == "0-19", family = quasibinomial()))
+
+Insurance_coefficients_ED <- data.frame(Insurance_ChildrenED$coefficients)
+Insurance_coefficients_ED$OR <- round(exp(Insurance_coefficients_ED$Estimate),2)
+Insurance_coefficients_ED$lower95 <- round((exp(Insurance_coefficients_ED$Estimate - 1.96*Insurance_coefficients_ED$Std..Error)),2)
+Insurance_coefficients_ED$upper95 <- round((exp(Insurance_coefficients_ED$Estimate + 1.96*Insurance_coefficients_ED$Std..Error)),2)
+```
+
+#### Exporting results to Excel
+```{r exporting to excel}
+sheets<-list("Table1 (PrimaryDX_Race)" = Race_coefficients, 
+             "Table2 (PrimaryDX_Income)" = Income_coefficients, 
+             "Table3 (PrimaryDX_Residence)" = UrRl_coefficients, 
+             "Table4 (PrimaryDX_Insurance)" = Insurance_coefficients,
+             "Table5 (Disp by Race)" = Race_coefficients_ED, 
+             "Table6 (Disp by Income)" = Income_coefficients_ED, 
+             "Table7 (Disp by Residence)" = UrRl_coefficients_ED, 
+             "Table8 (Disp by Insurance)" = Insurance_coefficients_ED)
+write.xlsx(sheets, file="survey_complete_case_analysis_tables.xlsx", rowNames = TRUE, keepNA=TRUE, overwrite=TRUE)
+```
+
+# Multiple Imputation
+```{r}
+# selecting variables for imputation model
+impute_data <- NEDS_2019_Cancer2 %>%
+  select(age, discwt.x, edevent, sex, hcupfile, hosp_ed, key_ed, neds_stratum.x, pay1_raw, urban_rural.residence, race, zipinc_qrtl, dxccsr_default_dx1, cancerSub, primary_cancer, hospwt, hosp_control, hosp_region, hosp_trauma, hosp_urcat4, hosp_ur_teach, CCSR_group, cancertype, cancer_exclude)
+
+# looking at patterns of missing data
+md.pattern(impute_data, rotate.names=TRUE)
+
+# performing multiple imputation
+# used 13 imputations for the percentage of missing data
+imp<-mice(impute_data, m=13, maxit=5, seed=219)
+
+# print imputation details. 
+imp
+```
+
+#### Multiple Imputation Diagnostics
+```{r}
+# check sex
+imp$imp$sex
+
+# check insurance
+imp$imp$pay1_raw
+
+# check rural_urban residence
+imp$imp$urban_rural.residence
+
+# check zip code income quartile
+imp$imp$zipinc_qrtl
+
+# check race
+imp$imp$race
+```
+
+### Getting full imputed dataset
+```{r}
+longimp <- mice::complete(data=imp, action="long", include = TRUE)
+```
+
+### Creating consolidated insurance variable
+```{r}
+longimp_new <- longimp %>%
+  mutate(pay1_group = case_when(pay1_raw == "Private" ~ 0,
+                                pay1_raw == "Medicaid" ~ 1,
+                                pay1_raw == "Medicare" ~ 3,
+                                pay1_raw == "Self-pay" ~ 2,
+                                pay1_raw == "No charge" ~ 2,
+                                pay1_raw == "Other" ~ 3)) %>%
+  mutate(pay1_group = factor(pay1_group, levels = c(0:3),
+                             labels = c("Private",
+                                        "Medicaid",
+                                        "Self-pay/No charge",
+                                        "Other")))
+
+# checking recode
+table(longimp_new$pay1_group, longimp_new$pay1_raw, useNA = "always")
+```
+
+#### Converting back to mids object
+```{r}
+imp2 <- as.mids(longimp_new)
+```
+
+# Un-weighted imputed analysis
+
+#### Race Analysis for primary cancer diagnosis - unweighted with imputed data
+```{r}
+# regression model for sex and race as predictors of having a cancer diagnosis as the primary ED diagnosis
+RaceChild <- with(imp2, glm(primary_cancer ~ race, family = quasibinomial(), subset = c(age < 20, cancer_exclude == 0)))
+
+Race_coefficients <- data.frame(summary(pool(RaceChild)))
+
+# calculating odds ratio
+Race_coefficients$OR <- round(exp(Race_coefficients$estimate),2)
+# calculating confidence intervals
+Race_coefficients$lower95 <- round(exp(Race_coefficients$estimate - 1.96*Race_coefficients$std.error),2)
+Race_coefficients$upper95 <- round(exp(Race_coefficients$estimate + 1.96*Race_coefficients$std.error),2)
+
+```
+
+#### Income Analysis for primary cancer diagnosis - unweighted with imputed data
+```{r}
+IncomeChild <- with(imp2, glm(primary_cancer ~ age + race + urban_rural.residence + zipinc_qrtl, family = quasibinomial(), subset = c(age < 20, cancer_exclude == 0)))
+
+Income_coefficients <- data.frame(summary(pool(IncomeChild)))
+# calculating odds ratio to two decimal places
+Income_coefficients$OR <- round(exp(Income_coefficients$estimate),2)
+# calculating confidence intervals
+Income_coefficients$lower95 <- round((exp(Income_coefficients$estimate - 1.96*Income_coefficients$std.error)),2)
+Income_coefficients$upper95 <- round((exp(Income_coefficients$estimate + 1.96*Income_coefficients$std.error)),2)
+```
+
+#### Urban_Rural Analysis for primary cancer diagnosis - unweighted with imputed data
+```{r}
+UrRlChild <- with(imp2,glm(primary_cancer ~ race + urban_rural.residence, family = quasibinomial(), subset = c(age < 20, cancer_exclude == 0)))
+
+UrRl_coefficients <- data.frame(summary(pool(UrRlChild)))
+UrRl_coefficients$OR <- round(exp(UrRl_coefficients$estimate),2)
+UrRl_coefficients$lower95 <- round((exp(UrRl_coefficients$estimate - 1.96*UrRl_coefficients$std.error)),2)
+UrRl_coefficients$upper95 <- round((exp(UrRl_coefficients$estimate + 1.96*UrRl_coefficients$std.error)),2)
+```
+
+#### Insurance Analysis for primary cancer diagnosis - unweighted with imputed data
+```{r}
+Insurance_Child <- with(imp2, glm(primary_cancer ~ age + race + zipinc_qrtl + urban_rural.residence + pay1_group, 
+                                  family = quasibinomial(),
+                                  subset = c(age < 20, cancer_exclude == 0)))
+
+Insurance_coefficients <- data.frame(summary(pool(Insurance_Child)))
+Insurance_coefficients$OR <- round(exp(Insurance_coefficients$estimate),2)
+Insurance_coefficients$lower95 <- round((exp(Insurance_coefficients$estimate - 1.96*Insurance_coefficients$std.error)),2)
+Insurance_coefficients$upper95 <- round((exp(Insurance_coefficients$estimate + 1.96*Insurance_coefficients$std.error)),2)
+```
+
+## ED Disposition Status - Released or Admitted - Unweighted
+#### Race Analysis for ED Disposition - unweighted with imputed data
+```{r}
+RaceChildED <- with(imp2, glm(primary_cancer ~ race, family = quasibinomial(), subset = c(age < 20, cancer_exclude == 0, edevent %in% c("ED visit in which the patient is treated and released","ED visit in which patient is admitted to same hosptial"))))
+
+Race_coefficients_ED <- data.frame(summary(pool(RaceChildED)))
+
+# calculating odds ratio
+Race_coefficients_ED$OR <- round(exp(Race_coefficients_ED$estimate),2)
+# calculating confidence intervals
+Race_coefficients_ED$lower95 <- round(exp(Race_coefficients_ED$estimate - 1.96*Race_coefficients_ED$std.error),2)
+Race_coefficients_ED$upper95 <- round(exp(Race_coefficients_ED$estimate + 1.96*Race_coefficients_ED$std.error),2)
+
+```
+
+#### Income Analysis for ED Disposition - unweighted with imputed data
+```{r}
+IncomeChildED <- with(imp2, glm(primary_cancer ~ age + race + urban_rural.residence + zipinc_qrtl, family = quasibinomial(), subset = c(age < 20, cancer_exclude == 0, edevent %in% c("ED visit in which the patient is treated and released","ED visit in which patient is admitted to same hosptial"))))
+
+Income_coefficients_ED <- data.frame(summary(pool(IncomeChildED)))
+# calculating odds ratio to two decimal places
+Income_coefficients_ED$OR <- round(exp(Income_coefficients_ED$estimate),2)
+# calculating confidence intervals
+Income_coefficients_ED$lower95 <- round((exp(Income_coefficients_ED$estimate - 1.96*Income_coefficients_ED$std.error)),2)
+Income_coefficients_ED$upper95 <- round((exp(Income_coefficients_ED$estimate + 1.96*Income_coefficients_ED$std.error)),2)
+```
+
+#### Urban_Rural Analysis for ED Disposition - unweighted with imputed data
+```{r}
+UrRlChildED <- with(imp2, glm(primary_cancer ~ race + urban_rural.residence, family = quasibinomial(), subset = c(age < 20, cancer_exclude == 0, edevent %in% c("ED visit in which the patient is treated and released","ED visit in which patient is admitted to same hosptial"))))
+
+UrRl_coefficients_ED <- data.frame(summary(pool(UrRlChildED)))
+UrRl_coefficients_ED$OR <- round(exp(UrRl_coefficients_ED$estimate),2)
+UrRl_coefficients_ED$lower95 <- round((exp(UrRl_coefficients_ED$estimate - 1.96*UrRl_coefficients_ED$std.error)),2)
+UrRl_coefficients_ED$upper95 <- round((exp(UrRl_coefficients_ED$estimate + 1.96*UrRl_coefficients_ED$std.error)),2)
+```
+
+#### Insurance Analysis for ED Disposition - unweighted with imputed data
+```{r}
+Insurance_ChildED <- with(imp2, glm(primary_cancer ~ age + race + zipinc_qrtl + urban_rural.residence + pay1_group, family = quasibinomial(), subset = c(age < 20, cancer_exclude == 0, edevent %in% c("ED visit in which the patient is treated and released","ED visit in which patient is admitted to same hosptial"))))
+
+Insurance_coefficients_ED <- data.frame(summary(pool(Insurance_ChildED)))
+Insurance_coefficients_ED$OR <- round(exp(Insurance_coefficients_ED$estimate),2)
+Insurance_coefficients_ED$lower95 <- round((exp(Insurance_coefficients_ED$estimate - 1.96*Insurance_coefficients_ED$std.error)),2)
+Insurance_coefficients_ED$upper95 <- round((exp(Insurance_coefficients_ED$estimate + 1.96*Insurance_coefficients_ED$std.error)),2)
+```
+
+#### Exporting results to Excel
+```{r exporting to excel}
+sheets<-list("Table1 (PrimaryDX_Race)" = Race_coefficients, 
+             "Table2 (PrimaryDX_Income)" = Income_coefficients, 
+             "Table3 (PrimaryDX_Residence)" = UrRl_coefficients, 
+             "Table4 (PrimaryDX_Insurance)" = Insurance_coefficients,
+             "Table5 (Disp by Race)" = Race_coefficients_ED, 
+             "Table6 (Disp by Income)" = Income_coefficients_ED, 
+             "Table7 (Disp by Residence)" = UrRl_coefficients_ED, 
+             "Table8 (Disp by Insurance)" = Insurance_coefficients_ED)
+write.xlsx(sheets, file="imputed_non_weighted_analysis.xlsx", rowNames = TRUE, keepNA=TRUE, overwrite=TRUE)
+```
+
+### Getting imputationList object
+```{r}
+longimp2 <- lapply( 1:13 , function( n ) complete( imp2 , action = n ) )
+```
+
+# Survey Design with imputed dataset
+```{r}
+svydes_imp <- svydesign(
+  id = ~key_ed, 
+  strata = ~neds_stratum.x,
+  weights = ~discwt.x,
+  nest = TRUE,
+  data = imputationList(longimp2),
+  multicore = T)
+# survey subset for cancer patients
+cancersub_imp <- subset(svydes_imp, cancer_exclude == 0)
+# survey subset for limiting ED event to treated and released versus admitted
+edeventsub_imp <- subset(svydes_imp, edevent %in% c("ED visit in which the patient is treated and released","ED visit in which patient is admitted to same hospital") & cancer_exclude == 0)
+# survey subset for ED disposition among just those with primary cancer-related encounter
+primary_edeventsub <- subset(svydes_imp, edevent %in% c("ED visit in which the patient is treated and released","ED visit in which patient is admitted to same hospital") & primary_cancer == "Yes")
+```
+
+#### Survey Race Analysis for primary cancer diagnosis with imputed - weighted analysis
+```{r}
+
+RaceChildren <- with(cancersub_imp, svyglm(primary_cancer ~ race, design = cancersub_imp, age < 20, family = quasibinomial())) 
+
+Race_coefficients <- summary(MIcombine(RaceChildren))
+
+# calculating odds ratio
+Race_coefficients$OR <- round(exp(Race_coefficients$results),2)
+# calculating confidence intervals
+Race_coefficients$lower95 <- round(exp(Race_coefficients$'(lower'),2)
+Race_coefficients$upper95 <- round(exp(Race_coefficients$'upper)'),2)
+
+```
+
+#### Survey Income Analysis for primary cancer diagnosis with imputed data - weighted analysis
+```{r}
+
+IncomeChildren <- with(cancersub_imp, svyglm(primary_cancer ~ age + race + urban_rural.residence + zipinc_qrtl, design = cancersub_imp, age < 20, family = quasibinomial())) 
+
+Income_coefficients <- summary(MIcombine(IncomeChildren))
+
+# calculating odds ratio
+Income_coefficients$OR <- round(exp(Income_coefficients$results),2)
+# calculating confidence intervals
+Income_coefficients$lower95 <- round(exp(Income_coefficients$'(lower'),2)
+Income_coefficients$upper95 <- round(exp(Income_coefficients$'upper)'),2)
+
+```
+
+#### Survey Urban_Rural Analysis for primary cancer diagnosis with imputed data - weighted analysis
+```{r}
+
+URChildren <- with(cancersub_imp, svyglm(primary_cancer ~ race + urban_rural.residence, design = cancersub_imp, 
+                                         age < 20, family = quasibinomial())) 
+
+UR_coefficients <- summary(MIcombine(URChildren))
+
+# calculating odds ratio
+UR_coefficients$OR <- round(exp(UR_coefficients$results),2)
+# calculating confidence intervals
+UR_coefficients$lower95 <- round(exp(UR_coefficients$'(lower'),2)
+UR_coefficients$upper95 <- round(exp(UR_coefficients$'upper)'),2)
+
+```
+
+#### Survey Insurance Analysis for primary cancer diagnosis with imputed data - weighted analysis
+```{r}
+
+Insur_Children <- with(cancersub_imp, svyglm(primary_cancer ~ age + race + zipinc_qrtl + urban_rural.residence + pay1_group, design = cancersub_imp, age < 20, family = quasibinomial())) 
+
+Insur_coefficients <- summary(MIcombine(Insur_Children))
+
+# calculating odds ratio
+Insur_coefficients$OR <- round(exp(Insur_coefficients$results),2)
+# calculating confidence intervals
+Insur_coefficients$lower95 <- round(exp(Insur_coefficients$'(lower'),2)
+Insur_coefficients$upper95 <- round(exp(Insur_coefficients$'upper)'),2)
+
+```
+
+## ED Disposition Status - Released or Admitted - Survey Analysis with imputed data
+#### Survey Race Analysis for ED Disposition with imputed data - weighted analysis
+```{r}
+
+RaceChildrenED <- with(edeventsub_imp, svyglm(edevent ~ race, design = edeventsub_imp, subset = age < 20, family = quasibinomial())) 
+
+Race_coefficientsED <- summary(MIcombine(RaceChildrenED))
+
+# calculating odds ratio
+Race_coefficientsED$OR <- round(exp(Race_coefficientsED$results),2)
+# calculating confidence intervals
+Race_coefficientsED$lower95 <- round(exp(Race_coefficientsED$'(lower'),2)
+Race_coefficientsED$upper95 <- round(exp(Race_coefficientsED$'upper)'),2)
+
+```
+
+#### Survey Income Analysis for ED Disposition with imputed data
+```{r}
+
+IncomeChildrenED <- with(edeventsub_imp, svyglm(edevent ~ age + race + urban_rural.residence + zipinc_qrtl, design = edeventsub_imp, age < 20, family = quasibinomial())) 
+
+Income_coefficientsED <- summary(MIcombine(IncomeChildrenED))
+
+# calculating odds ratio
+Income_coefficientsED$OR <- round(exp(Income_coefficientsED$results),2)
+# calculating confidence intervals
+Income_coefficientsED$lower95 <- round(exp(Income_coefficientsED$'(lower'),2)
+Income_coefficientsED$upper95 <- round(exp(Income_coefficientsED$'upper)'),2)
+
+```
+
+#### Survey Urban_rural Analysis for ED Disposition with imputed data
+```{r}
+
+URChildrenED <- with(edeventsub_imp, svyglm(edevent ~ race + urban_rural.residence, design = edeventsub_imp, age < 20, family = quasibinomial())) 
+
+UR_coefficientsED <- summary(MIcombine(URChildrenED))
+
+# calculating odds ratio
+UR_coefficientsED$OR <- round(exp(UR_coefficientsED$results),2)
+# calculating confidence intervals
+UR_coefficientsED$lower95 <- round(exp(UR_coefficientsED$'(lower'),2)
+UR_coefficientsED$upper95 <- round(exp(UR_coefficientsED$'upper)'),2)
+
+```
+
+#### Survey Insurance Analysis for ED Disposition with imputed data
+```{r}
+
+Insur_ChildrenED <- with(edeventsub_imp, svyglm(edevent ~ age + race + zipinc_qrtl + urban_rural.residence + pay1_group, design = edeventsub_imp, age < 20, family = quasibinomial())) 
+
+Insur_coefficientsED <- summary(MIcombine(Insur_ChildrenED))
+
+# calculating odds ratio
+Insur_coefficientsED$OR <- round(exp(Insur_coefficientsED$results),2)
+# calculating confidence intervals
+Insur_coefficientsED$lower95 <- round(exp(Insur_coefficientsED$'(lower'),2)
+Insur_coefficientsED$upper95 <- round(exp(Insur_coefficientsED$'upper)'),2)
+
+```
+
+## Exporting results to Excel
+```{r exporting to excel}
+sheets<-list("Table1 (PrimaryDX_Race)" = Race_coefficients, 
+             "Table2 (PrimaryDX_Income)" = Income_coefficients, 
+             "Table3 (PrimaryDX_Residence)" = UR_coefficients, 
+             "Table4 (PrimaryDX_Insurance)" = Insur_coefficients,
+             "Table5 (Disp by Race)" = Race_coefficientsED, 
+             "Table6 (Disp by Income)" = Income_coefficientsED, 
+             "Table7 (Disp by Residence)" = UR_coefficientsED, 
+             "Table8 (Disp by Insurance)" = Insur_coefficientsED)
+write.xlsx(sheets, file="imputed_survey_analysis_tables.xlsx", rowNames = TRUE, keepNA=TRUE, overwrite=TRUE)
+```
+
+## ED Disposition Status - among primary cancer-related encounters
+#### Survey Race Analysis for ED Disposition with imputed data - primary cancer related encounters
+```{r}
+
+RaceChildrenED_primary <- with(primary_edeventsub, svyglm(edevent ~ race, design = primary_edeventsub, subset = age < 20, family = quasibinomial())) 
+
+Race_coefED_primary <- summary(MIcombine(RaceChildrenED_primary))
+
+# calculating odds ratio
+Race_coefED_primary$OR <- round(exp(Race_coefED_primary$results),2)
+# calculating confidence intervals
+Race_coefED_primary$lower95 <- round(exp(Race_coefED_primary$'(lower'),2)
+Race_coefED_primary$upper95 <- round(exp(Race_coefED_primary$'upper)'),2)
+
+```
+
+#### Survey Income Analysis for ED Disposition with imputed data - primary cancer related encounters
+```{r}
+
+IncomeChildrenED_primary <- with(primary_edeventsub, svyglm(edevent ~ age + race + urban_rural.residence + zipinc_qrtl, design = primary_edeventsub, age < 20, family = quasibinomial())) 
+
+Income_coefED_primary <- summary(MIcombine(IncomeChildrenED_primary))
+
+# calculating odds ratio
+Income_coefED_primary$OR <- round(exp(Income_coefED_primary$results),2)
+# calculating confidence intervals
+Income_coefED_primary$lower95 <- round(exp(Income_coefED_primary$'(lower'),2)
+Income_coefED_primary$upper95 <- round(exp(Income_coefED_primary$'upper)'),2)
+
+```
+
+#### Survey Rurality Analysis for ED Disposition with imputed data - primary cancer related encounters
+```{r}
+
+URChildrenED_primary <- with(primary_edeventsub, svyglm(edevent ~ race + urban_rural.residence, design = primary_edeventsub, age < 20, family = quasibinomial())) 
+
+UR_coefED_primary <- summary(MIcombine(URChildrenED_primary))
+
+# calculating odds ratio
+UR_coefED_primary$OR <- round(exp(UR_coefED_primary$results),2)
+# calculating confidence intervals
+UR_coefED_primary$lower95 <- round(exp(UR_coefED_primary$'(lower'),2)
+UR_coefED_primary$upper95 <- round(exp(UR_coefED_primary$'upper)'),2)
+
+```
+
+#### Survey Insurance Analysis for ED Disposition with imputed data - primary cancer related encounters
+```{r}
+
+Insur_ChildrenED_primary <- with(primary_edeventsub, svyglm(edevent ~ age + race + zipinc_qrtl + urban_rural.residence + pay1_group, design = primary_edeventsub, age < 20, family = quasibinomial())) 
+
+Insur_coefED_primary <- summary(MIcombine(Insur_ChildrenED_primary))
+
+# calculating odds ratio
+Insur_coefED_primary$OR <- round(exp(Insur_coefED_primary$results),2)
+# calculating confidence intervals
+Insur_coefED_primary$lower95 <- round(exp(Insur_coefED_primary$'(lower'),2)
+Insur_coefED_primary$upper95 <- round(exp(Insur_coefED_primary$'upper)'),2)
+
+```
+
+## Disposition by race with cancer type added as a covariate
+```{r}
+## Model with cancer type added in as covariate
+Cancertype_model <- with(edeventsub_imp, svyglm(edevent ~ race + cancertype, design = edeventsub_imp, age < 20 & race %in% c("White","Black","Hispanic") & cancertype %in% c("Bone","brain or nervous system","Endocrine systems","Hodgkin lymphoma","Leukemia","Non-hodgkin lymphoma","Sarcoma","Urinary systems"), family = quasibinomial())) 
+
+# Model with all cancers and all races
+
+Race_cantype <- with(edeventsub_imp, svyglm(edevent ~ race + cancertype, design = edeventsub_imp, age < 20, family = quasibinomial())) 
+
+cancertype_coef <- summary(MIcombine(Race_cantype))
+
+# calculating odds ratio
+cancertype_coef$OR <- round(exp(cancertype_coef$results),2)
+# calculating confidence intervals
+cancertype_coef$lower95 <- round(exp(cancertype_coef$'(lower'),2)
+cancertype_coef$upper95 <- round(exp(cancertype_coef$'upper)'),2)
+
+# Adding insurance and zip code income quartile
+Race_adjusted <- with(edeventsub_imp, svyglm(edevent ~ race + cancertype + zipinc_qrtl + pay1_group + age, design = edeventsub_imp, age < 20, family = quasibinomial())) 
+
+race_adj_coef <- summary(MIcombine(Race_adjusted))
+
+# calculating odds ratio
+race_adj_coef$OR <- round(exp(race_adj_coef$results),2)
+# calculating confidence intervals
+race_adj_coef$lower95 <- round(exp(race_adj_coef$'(lower'),2)
+race_adj_coef$upper95 <- round(exp(race_adj_coef$'upper)'),2)
+
+# Adding in interaction term 
+Cancertype_em <- with(edeventsub_imp, svyglm(edevent ~ race + cancertype + race*cancertype, design = edeventsub_imp, age < 20 & race %in% c("White","Black","Hispanic") & cancertype %in% c("Bone","brain or nervous system","Endocrine systems","Hodgkin lymphoma","Leukemia","Non-hodgkin lymphoma","Sarcoma","Urinary systems"), family = quasibinomial())) 
+
+
+# Comparing the models 
+D1(Cancertype_em, Cancertype_model)
+
+
+```
+
+
